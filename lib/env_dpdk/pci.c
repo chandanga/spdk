@@ -59,6 +59,20 @@ find_env_devargs(struct rte_bus *bus, const char *name)
 	return NULL;
 }
 
+static struct spdk_vf_state*
+spdk_pci_get_vf_state(struct spdk_pci_addr *bdf, struct spdk_pci_driver *driver)
+{
+	for (int i = 0; i < max_vf_count; ++i) {
+		if (driver->vf_states[i].bdf.bus == bdf->bus &&
+		    driver->vf_states[i].bdf.dev == bdf->dev &&
+		    driver->vf_states[i].bdf.func == bdf->func) {
+			return &driver->vf_states[i];
+		}
+	}
+
+	return NULL;
+}
+
 static int
 map_bar_rte(struct spdk_pci_device *device, uint32_t bar,
 	    void **mapped_addr, uint64_t *phys_addr, uint64_t *size)
@@ -399,7 +413,21 @@ pci_device_init(struct rte_pci_driver *_drv,
 	dev->internal.driver = driver;
 	dev->internal.claim_fd = -1;
 
-	if (driver->cb_fn != NULL) {
+	if (driver->cb_fn == NULL) {
+		SPDK_PRINTF("pci_device_init, driver->cb_fn == NULL, fetch the per VF state\n");
+		struct spdk_vf_state *vf_state = spdk_pci_get_vf_state(&dev->addr, driver);
+		if (vf_state == NULL) {
+			SPDK_ERRLOG("pci_device_init, failed to fetch the vf_state\n");
+			return -1;
+		}
+		rc = vf_state->cb_fn(vf_state->cb_arg, dev);
+		
+		if (rc != 0) {
+			free(dev);
+			return rc;
+		}
+		dev->internal.attached = true;
+	} else if (driver->cb_fn != NULL) {
 		rc = driver->cb_fn(driver->cb_arg, dev);
 		if (rc != 0) {
 			free(dev);
@@ -631,19 +659,35 @@ spdk_pci_device_attach(struct spdk_pci_driver *driver,
 		return rc;
 	}
 
-	driver->cb_fn = enum_cb;
-	driver->cb_arg = enum_ctx;
-
+	pthread_mutex_lock(&g_pci_mutex);
+	struct spdk_vf_state *vf_state = spdk_pci_get_vf_state(pci_address, driver);
+	
+	if (vf_state == NULL) {
+		SPDK_PRINTF("spdk_pci_device_attach, vf_state == NULL, initialize a new VF state\n");
+		driver->vf_states[driver->vf_state_count].bdf = *pci_address;
+		driver->vf_states[driver->vf_state_count].cb_fn = enum_cb;
+		driver->vf_states[driver->vf_state_count].cb_arg = enum_ctx;
+		
+		vf_state = &driver->vf_states[driver->vf_state_count];
+	}
+	driver->vf_state_count++;
+	pthread_mutex_unlock(&g_pci_mutex);
+			
 	rc = -ENODEV;
 	TAILQ_FOREACH(provider, &g_pci_device_providers, tailq) {
+		// This leads to a DPDK call that invokes the cb_fn = enum_cb (pcie_nvme_enum_cb), after a while.
 		rc = provider->attach_cb(pci_address);
+		SPDK_PRINTF("spdk_pci_device_attach, after attach_cb\n");
 		if (rc == 0) {
 			break;
 		}
 	}
+	
+	if (vf_state != NULL) {
+		vf_state->cb_fn = NULL;
+		vf_state->cb_arg = NULL;
+	}
 
-	driver->cb_arg = NULL;
-	driver->cb_fn = NULL;
 
 	cleanup_pci_devices();
 

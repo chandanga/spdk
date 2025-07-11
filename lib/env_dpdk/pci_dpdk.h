@@ -8,6 +8,14 @@
 
 #include "spdk/env.h"
 
+struct spdk_vf_state {
+	struct spdk_pci_addr bdf;
+	spdk_pci_enum_cb cb_fn;
+	void *cb_arg;
+};
+
+#define max_vf_count 64
+
 struct spdk_pci_driver {
 	uint8_t				driver_buf[256];
 	struct rte_pci_driver		*driver;
@@ -18,6 +26,10 @@ struct spdk_pci_driver {
 
 	spdk_pci_enum_cb		cb_fn;
 	void				*cb_arg;
+
+	struct spdk_vf_state vf_states[max_vf_count];
+	int                  vf_state_count;
+
 	TAILQ_ENTRY(spdk_pci_driver)	tailq;
 };
 
