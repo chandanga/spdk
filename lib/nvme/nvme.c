@@ -640,7 +640,6 @@ nvme_driver_init(void)
 	return ret;
 }
 
-/* This function must only be called while holding g_spdk_nvme_driver->lock */
 int
 nvme_ctrlr_probe(const struct spdk_nvme_transport_id *trid,
 		 struct spdk_nvme_probe_ctx *probe_ctx, void *devhandle)
@@ -652,6 +651,8 @@ nvme_ctrlr_probe(const struct spdk_nvme_transport_id *trid,
 
 	spdk_nvme_ctrlr_get_default_ctrlr_opts(&opts, sizeof(opts));
 
+	nvme_robust_mutex_lock(&g_spdk_nvme_driver->lock);
+
 	if (!probe_ctx->probe_cb || probe_ctx->probe_cb(probe_ctx->cb_ctx, trid, &opts)) {
 		ctrlr = nvme_get_ctrlr_by_trid_unsafe(trid, opts.hostnqn);
 		if (ctrlr) {
@@ -662,6 +663,7 @@ nvme_ctrlr_probe(const struct spdk_nvme_transport_id *trid,
 				SPDK_ERRLOG("NVMe controller for SSD: %s is being destructed\n",
 					    trid->traddr);
 				probe_ctx->attach_fail_cb(probe_ctx->cb_ctx, trid, -EBUSY);
+				nvme_robust_mutex_unlock(&g_spdk_nvme_driver->lock);
 				return -EBUSY;
 			}
 
@@ -669,10 +671,9 @@ nvme_ctrlr_probe(const struct spdk_nvme_transport_id *trid,
 			* call nvme_detach() immediately. */
 			nvme_ctrlr_proc_get_ref(ctrlr);
 
+			nvme_robust_mutex_unlock(&g_spdk_nvme_driver->lock);
 			if (probe_ctx->attach_cb) {
-				nvme_robust_mutex_unlock(&g_spdk_nvme_driver->lock);
 				probe_ctx->attach_cb(probe_ctx->cb_ctx, &ctrlr->trid, ctrlr, &ctrlr->opts);
-				nvme_robust_mutex_lock(&g_spdk_nvme_driver->lock);
 			}
 			return 0;
 		}
@@ -681,6 +682,7 @@ nvme_ctrlr_probe(const struct spdk_nvme_transport_id *trid,
 		if (ctrlr == NULL) {
 			SPDK_ERRLOG("Failed to construct NVMe controller for SSD: %s\n", trid->traddr);
 			probe_ctx->attach_fail_cb(probe_ctx->cb_ctx, trid, -ENODEV);
+			nvme_robust_mutex_unlock(&g_spdk_nvme_driver->lock);
 			return -1;
 		}
 		ctrlr->remove_cb = probe_ctx->remove_cb;
@@ -688,9 +690,11 @@ nvme_ctrlr_probe(const struct spdk_nvme_transport_id *trid,
 
 		nvme_qpair_set_state(ctrlr->adminq, NVME_QPAIR_ENABLED);
 		TAILQ_INSERT_TAIL(&probe_ctx->init_ctrlrs, ctrlr, tailq);
+		nvme_robust_mutex_unlock(&g_spdk_nvme_driver->lock);
 		return 0;
 	}
 
+	nvme_robust_mutex_unlock(&g_spdk_nvme_driver->lock);
 	return 1;
 }
 
